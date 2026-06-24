@@ -1,22 +1,18 @@
-"""Base Agent class for the Nexus / agentic-ai swarm with REAL Grok tool calling + full ASYNC support.
+"""Base Agent class for the Nexus / agentic-ai swarm with REAL Grok tool calling + full ASYNC + STREAMING support.
 
 Features:
 - Persistent state (skilllogin-style)
 - Persona embodiment + handoff protocol
 - REAL Grok / xAI tool calling (sync + async)
+- Streaming responses (async)
 - ReAct-style agentic loops (sync + async)
-- Extensible Nexus tool registry (mesh, QCoin, creative, integration analysis)
-- Graceful fallback when no API key
+- Extensible Nexus tool registry
 
-All specialized agents (Lyra, Xen, Nexus) inherit this.
-
-pip install openai
-
-export XAI_API_KEY=sk-...
+All specialized agents inherit this.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, AsyncGenerator
 import json
 import os
 import time
@@ -31,7 +27,7 @@ except ImportError:
 
 
 class BaseAgent(ABC):
-    """Abstract base for all Nexus agents with sync + async Grok tool calling."""
+    """Abstract base for all Nexus agents with sync + async + streaming Grok support."""
 
     DEFAULT_TOOLS = [
         {
@@ -107,7 +103,6 @@ class BaseAgent(ABC):
         self._ensure_state_dir()
         self.login()
 
-        # Sync + Async Grok clients
         self.client: Optional[OpenAI] = None
         self.async_client: Optional[AsyncOpenAI] = None
         self._init_grok_clients()
@@ -153,24 +148,23 @@ class BaseAgent(ABC):
         return self.state.get(key, default)
 
     def _init_grok_clients(self):
-        """Initialize both sync and async Grok/xAI clients."""
         if not OPENAI_AVAILABLE:
             print("[BaseAgent] Warning: openai not installed. Grok calls will be simulated.")
             return
 
         api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY")
         if not api_key:
-            print("[BaseAgent] Info: XAI_API_KEY not set → using simulated mode.")
+            print("[BaseAgent] Info: XAI_API_KEY not set → simulated mode.")
             return
 
         try:
             self.client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
             self.async_client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
-            print(f"[{self.name}] ✅ Grok tool calling enabled (sync + async)")
+            print(f"[{self.name}] ✅ Grok tool calling enabled (sync + async + streaming)")
         except Exception as e:
             print(f"[{self.name}] Failed to init Grok clients: {e}")
 
-    # ==================== SYNC GROK METHODS ====================
+    # ==================== SYNC METHODS ====================
 
     def call_grok(
         self,
@@ -181,34 +175,26 @@ class BaseAgent(ABC):
         max_tokens: int = 2048,
         tool_choice: str = "auto"
     ) -> Dict[str, Any]:
-        """Synchronous Grok call with tool support."""
         if not self.client:
             return {
-                "error": "Grok client not ready. Set XAI_API_KEY.",
+                "error": "Grok client not ready.",
                 "simulated": True,
                 "content": "[Simulated] " + messages[-1].get("content", "")[:300]
             }
-
         tools = tools or self.tools
         try:
             resp = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
-                temperature=temperature,
-                max_tokens=max_tokens
+                model=model, messages=messages, tools=tools,
+                tool_choice=tool_choice, temperature=temperature, max_tokens=max_tokens
             )
             return resp.model_dump()
         except Exception as e:
             return {"error": str(e)}
 
     def execute_tool_call(self, tool_call: Dict) -> Any:
-        """Execute a tool call returned by Grok (sync version). Override in subclasses for real actions."""
         func = tool_call.get("function", {})
         name = func.get("name")
         args = json.loads(func.get("arguments", "{}")) if func.get("arguments") else {}
-
         self.log_event("tool_call", f"{name}({args})")
 
         if name == "analyze_nexus_integration":
@@ -222,104 +208,101 @@ class BaseAgent(ABC):
         else:
             return {"unknown_tool": name, "args": args}
 
-    def agentic_react_loop(
-        self, user_input: str, max_steps: int = 5, model: str = "grok-3"
-    ) -> str:
-        """Sync ReAct loop using real Grok tool calling."""
+    def agentic_react_loop(self, user_input: str, max_steps: int = 5, model: str = "grok-3") -> str:
         messages = [
             {"role": "system", "content": f"You are {self.name} Nexus agent. Use tools when helpful."},
             {"role": "user", "content": user_input}
         ]
-
         for _ in range(max_steps):
             response = self.call_grok(messages, tools=self.tools, model=model)
             if "error" in response:
                 return f"Error: {response['error']}"
-
             message = response["choices"][0]["message"]
             messages.append(message)
-
             tool_calls = message.get("tool_calls", [])
             if not tool_calls:
                 return message.get("content", "No final answer")
-
             for tc in tool_calls:
                 result = self.execute_tool_call(tc)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id"),
-                    "content": json.dumps(result)
-                })
-
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": json.dumps(result)})
         return "Max steps reached."
 
-    # ==================== ASYNC GROK METHODS (NEW) ====================
+    # ==================== ASYNC + STREAMING METHODS ====================
 
     async def async_call_grok(
-        self,
-        messages: List[Dict[str, str]],
-        tools: Optional[List[Dict]] = None,
-        model: str = "grok-3",
-        temperature: float = 0.7,
-        max_tokens: int = 2048,
-        tool_choice: str = "auto"
+        self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None,
+        model: str = "grok-3", temperature: float = 0.7, max_tokens: int = 2048, tool_choice: str = "auto"
     ) -> Dict[str, Any]:
-        """ASYNC Grok call with full tool support. Non-blocking."""
         if not self.async_client:
-            # Fallback to sync simulated if async not available
-            sync_result = self.call_grok(messages, tools, model, temperature, max_tokens, tool_choice)
-            return sync_result
-
+            return self.call_grok(messages, tools, model, temperature, max_tokens, tool_choice)
         tools = tools or self.tools
         try:
             resp = await self.async_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
-                temperature=temperature,
-                max_tokens=max_tokens
+                model=model, messages=messages, tools=tools,
+                tool_choice=tool_choice, temperature=temperature, max_tokens=max_tokens
             )
             return resp.model_dump()
         except Exception as e:
             return {"error": str(e)}
 
     async def async_execute_tool_call(self, tool_call: Dict) -> Any:
-        """Async version of tool execution. Override for real async operations (mesh, blockchain, I/O)."""
-        # For now delegate to sync version (most tools are fast).
-        # Future: make mesh queries, QCoin RPCs, hardware calls truly async here.
         return self.execute_tool_call(tool_call)
 
-    async def async_agentic_react_loop(
-        self, user_input: str, max_steps: int = 5, model: str = "grok-3"
-    ) -> str:
-        """ASYNC ReAct loop with real Grok tool calling. Ideal for concurrent swarms or I/O-heavy agents."""
+    async def async_agentic_react_loop(self, user_input: str, max_steps: int = 5, model: str = "grok-3") -> str:
         messages = [
             {"role": "system", "content": f"You are {self.name} Nexus agent. Use tools when helpful."},
             {"role": "user", "content": user_input}
         ]
-
         for _ in range(max_steps):
             response = await self.async_call_grok(messages, tools=self.tools, model=model)
             if "error" in response:
                 return f"Error: {response['error']}"
-
             message = response["choices"][0]["message"]
             messages.append(message)
-
             tool_calls = message.get("tool_calls", [])
             if not tool_calls:
                 return message.get("content", "No final answer from Grok")
-
             for tc in tool_calls:
                 result = await self.async_execute_tool_call(tc)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id"),
-                    "content": json.dumps(result)
-                })
-
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": json.dumps(result)})
         return "Max steps reached in async loop."
+
+    async def async_stream_grok(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        model: str = "grok-3",
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+    ) -> AsyncGenerator[str, None]:
+        """ASYNC STREAMING Grok responses.
+
+        Yields text chunks as they are generated by the model.
+        Perfect for real-time UI, long responses, or live demos.
+        """
+        if not self.async_client:
+            # Simulated streaming (nice for offline demo)
+            text = "[Simulated streaming] " + messages[-1].get("content", "")[:500]
+            for char in text:
+                yield char
+                await asyncio.sleep(0.006)
+            return
+
+        tools = tools or self.tools
+        try:
+            stream = await self.async_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True
+            )
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            yield f"\n[Streaming Error] {str(e)}"
 
     # ==================== COMMON METHODS ====================
 
@@ -337,7 +320,7 @@ class BaseAgent(ABC):
 
     def use_tool(self, tool_name: str, **kwargs) -> Any:
         self.log_event("tool_use", f"{tool_name} with {kwargs}")
-        return {"status": "prefer agentic_react_loop or async_agentic_react_loop", "tool": tool_name}
+        return {"status": "prefer async_agentic_react_loop or async_stream_grok", "tool": tool_name}
 
     def integrate_with_mesh(self, action: str):
         return self.use_tool("mesh", action=action)
@@ -346,5 +329,5 @@ class BaseAgent(ABC):
         return self.use_tool("blockchain", action=action)
 
     def __repr__(self):
-        grok_mode = "async+sync" if self.async_client else ("sync-only" if self.client else "simulated")
+        grok_mode = "async+stream" if self.async_client else ("sync-only" if self.client else "simulated")
         return f"<{self.name}Agent sessions={self.get_state('session_count')} grok={grok_mode}>"
