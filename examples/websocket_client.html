@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus Agent • WebSocket Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', system_ui, sans-serif; }
+        .font-display { font-family: 'Space Grotesk', system_ui, sans-serif; }
+        .stream-container { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+        .token { animation: fadeIn 0.1s ease forwards; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .log-line { font-size: 0.75rem; }
+    </style>
+</head>
+<body class="bg-zinc-950 text-zinc-200">
+    <div class="max-w-5xl mx-auto p-6">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-8">
+            <div class="flex items-center gap-x-3">
+                <div class="w-11 h-11 bg-violet-600 rounded-2xl flex items-center justify-center">
+                    <i class="fa-solid fa-plug text-white text-2xl"></i>
+                </div>
+                <div>
+                    <h1 class="font-display text-3xl font-semibold tracking-tight">Nexus Agent</h1>
+                    <p class="text-zinc-400 text-sm">WebSocket + Reconnection</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-x-3">
+                <!-- Connection Status -->
+                <div id="status-badge"
+                     class="flex items-center gap-x-2 px-4 py-2 bg-zinc-900 border border-zinc-700 rounded-2xl text-sm font-medium">
+                    <div id="status-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-400"></div>
+                    <span id="status-text" class="text-emerald-400">Connected</span>
+                </div>
+
+                <button onclick="disconnect()"
+                        class="px-4 py-2 text-sm bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-2xl flex items-center gap-x-2">
+                    <i class="fa-solid fa-times"></i>
+                    <span>Disconnect</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+                <div class="md:col-span-7">
+                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">PROMPT</label>
+                    <input id="prompt-input" type="text"
+                           class="w-full bg-zinc-950 border border-zinc-700 focus:border-violet-500 rounded-2xl px-4 py-3 text-sm outline-none"
+                           value="Design QCoin incentives for emotional and technical agent swarms">
+                </div>
+
+                <div class="md:col-span-2">
+                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">MODEL</label>
+                    <select id="model-select" class="w-full bg-zinc-950 border border-zinc-700 rounded-2xl px-4 py-3 text-sm">
+                        <option value="grok-3">grok-3</option>
+                        <option value="grok-beta">grok-beta</option>
+                    </select>
+                </div>
+
+                <div class="md:col-span-2">
+                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">TEMPERATURE</label>
+                    <div class="flex items-center gap-x-3">
+                        <input type="range" id="temp-slider" class="flex-1 accent-violet-500" min="0" max="2" step="0.1" value="0.7">
+                        <span id="temp-value" class="font-mono text-sm w-8 text-center">0.7</span>
+                    </div>
+                </div>
+
+                <div class="md:col-span-1 flex items-end">
+                    <button onclick="sendPrompt()"
+                            class="w-full bg-violet-600 hover:bg-violet-500 transition-all text-white font-semibold py-3 px-5 rounded-2xl flex items-center justify-center gap-x-2 shadow-lg shadow-violet-950">
+                        <i class="fa-solid fa-paper-plane"></i>
+                        <span>Send</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Output Area -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+            <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-x-2">
+                    <i class="fa-solid fa-comments text-zinc-400"></i>
+                    <span class="font-semibold">Live Agent Stream</span>
+                </div>
+                <div class="flex items-center gap-x-2">
+                    <button onclick="clearOutput()"
+                            class="text-xs px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-xl flex items-center gap-x-1.5">
+                        <i class="fa-solid fa-eraser"></i>
+                        <span>Clear</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="output"
+                 class="stream-container bg-zinc-950 border border-zinc-800 rounded-2xl p-5 h-[380px] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
+                <div class="text-zinc-500 italic">Connect and send a prompt to begin...</div>
+            </div>
+
+            <!-- Event Log -->
+            <div class="mt-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-medium text-zinc-400">EVENT LOG</span>
+                    <span id="reconnect-info" class="text-xs text-zinc-500"></span>
+                </div>
+                <div id="event-log"
+                     class="bg-zinc-950 border border-zinc-800 rounded-2xl p-3 h-[120px] overflow-y-auto text-xs font-mono text-zinc-400">
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-6 text-center text-[10px] text-zinc-500">
+            WebSocket: <span class="font-mono">ws://localhost:8001/ws</span> &nbsp;•&nbsp; Auto-reconnect enabled
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 10;
+        let reconnectTimeout = null;
+        let isManuallyDisconnected = false;
+
+        function updateStatus(status, color = 'emerald') {
+            const badge = document.getElementById('status-badge');
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+
+            text.textContent = status;
+
+            dot.className = `w-2.5 h-2.5 rounded-full bg-${color}-400`;
+            if (color === 'emerald') {
+                badge.className = 'flex items-center gap-x-2 px-4 py-2 bg-zinc-900 border border-emerald-800 rounded-2xl text-sm font-medium';
+            } else if (color === 'amber') {
+                badge.className = 'flex items-center gap-x-2 px-4 py-2 bg-zinc-900 border border-amber-800 rounded-2xl text-sm font-medium';
+            } else {
+                badge.className = 'flex items-center gap-x-2 px-4 py-2 bg-zinc-900 border border-red-800 rounded-2xl text-sm font-medium';
+            }
+        }
+
+        function logEvent(message, type = 'info') {
+            const log = document.getElementById('event-log');
+            const line = document.createElement('div');
+            line.className = `log-line py-0.5 ${type === 'error' ? 'text-red-400' : type === 'success' ? 'text-emerald-400' : ''}`;
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+
+            // Keep only last 30 lines
+            while (log.children.length > 30) {
+                log.removeChild(log.firstChild);
+            }
+        }
+
+        function appendMessage(content, type = 'message') {
+            const output = document.getElementById('output');
+
+            if (output.querySelector('.italic')) output.innerHTML = '';
+
+            if (type === 'message') {
+                const span = document.createElement('span');
+                span.className = 'token';
+                span.textContent = content;
+                output.appendChild(span);
+            } else if (type === 'tool_call') {
+                const div = document.createElement('div');
+                div.className = 'my-2 px-3 py-1.5 bg-zinc-900 border border-violet-800 rounded-xl text-xs flex items-center gap-x-2';
+                div.innerHTML = `<i class="fa-solid fa-tools text-violet-400"></i> <span class="font-semibold text-violet-300">Tool Call:</span> <span class="font-mono">${content}</span>`;
+                output.appendChild(div);
+            } else if (type === 'final_answer') {
+                const div = document.createElement('div');
+                div.className = 'mt-4 pt-4 border-t border-zinc-700 text-emerald-300';
+                div.innerHTML = `<strong>Final Answer:</strong><br>${content}`;
+                output.appendChild(div);
+            }
+
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            const url = 'ws://localhost:8001/ws';
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                reconnectAttempts = 0;
+                updateStatus('Connected', 'emerald');
+                logEvent('WebSocket connected', 'success');
+                document.getElementById('reconnect-info').textContent = '';
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleMessage(data);
+                } catch (e) {
+                    console.error('Failed to parse message', e);
+                }
+            };
+
+            ws.onclose = (event) => {
+                updateStatus('Disconnected', 'red');
+                logEvent(`Disconnected (code ${event.code})`, 'error');
+
+                if (!isManuallyDisconnected) {
+                    attemptReconnect();
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                logEvent('WebSocket error occurred', 'error');
+            };
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts >= maxReconnectAttempts) {
+                logEvent('Max reconnection attempts reached', 'error');
+                updateStatus('Failed to reconnect', 'red');
+                return;
+            }
+
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff
+
+            updateStatus(`Reconnecting... (${reconnectAttempts})`, 'amber');
+            document.getElementById('reconnect-info').textContent = `Reconnecting in ${delay/1000}s`;
+
+            logEvent(`Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})`);
+
+            reconnectTimeout = setTimeout(() => {
+                logEvent('Attempting to reconnect...');
+                connectWebSocket();
+            }, delay);
+        }
+
+        function disconnect() {
+            isManuallyDisconnected = true;
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            updateStatus('Disconnected', 'red');
+            logEvent('Manually disconnected');
+        }
+
+        function handleMessage(data) {
+            const type = data.type;
+
+            switch (type) {
+                case 'start':
+                    appendMessage(`Started processing: ${data.prompt}`, 'message');
+                    logEvent(`Started: ${data.prompt}`);
+                    break;
+
+                case 'message':
+                    appendMessage(data.content, 'message');
+                    break;
+
+                case 'tool_call':
+                    const toolInfo = `${data.tool}(${JSON.stringify(data.input).slice(0, 60)}...)`;
+                    appendMessage(toolInfo, 'tool_call');
+                    logEvent(`Tool called: ${data.tool}`);
+                    break;
+
+                case 'tool_result':
+                    logEvent(`Tool result received: ${data.tool}`);
+                    break;
+
+                case 'final_answer':
+                    appendMessage(data.content, 'final_answer');
+                    logEvent('Received final answer');
+                    break;
+
+                case 'done':
+                    logEvent('Stream completed', 'success');
+                    break;
+
+                case 'error':
+                    appendMessage(`Error: ${data.message}`, 'message');
+                    logEvent(`Error: ${data.message}`, 'error');
+                    break;
+
+                default:
+                    console.log('Unknown message type:', data);
+            }
+        }
+
+        function sendPrompt() {
+            const prompt = document.getElementById('prompt-input').value.trim();
+            if (!prompt) {
+                alert('Please enter a prompt');
+                return;
+            }
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                logEvent('Not connected. Attempting to connect...', 'error');
+                connectWebSocket();
+                // Wait a bit then send
+                setTimeout(() => sendPrompt(), 800);
+                return;
+            }
+
+            const model = document.getElementById('model-select').value;
+            const temperature = parseFloat(document.getElementById('temp-slider').value);
+
+            const message = {
+                type: "prompt",
+                prompt: prompt,
+                model: model,
+                temperature: temperature
+            };
+
+            ws.send(JSON.stringify(message));
+            logEvent(`Sent prompt: ${prompt.substring(0, 50)}...`);
+
+            // Clear output for new response
+            const output = document.getElementById('output');
+            output.innerHTML = '';
+        }
+
+        function clearOutput() {
+            document.getElementById('output').innerHTML = '<div class="text-zinc-500 italic">Response cleared...</div>';
+            document.getElementById('event-log').innerHTML = '';
+        }
+
+        function setupUI() {
+            // Temperature slider
+            const slider = document.getElementById('temp-slider');
+            const valueDisplay = document.getElementById('temp-value');
+
+            slider.oninput = () => valueDisplay.textContent = slider.value;
+
+            // Auto-connect on load
+            setTimeout(() => {
+                connectWebSocket();
+            }, 300);
+
+            // Enter key support
+            document.getElementById('prompt-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') sendPrompt();
+            });
+
+            // Initial log
+            setTimeout(() => {
+                logEvent('WebSocket client initialized');
+            }, 500);
+        }
+
+        window.onload = setupUI;
+
+        // Cleanup on page unload
+        window.onbeforeunload = () => {
+            if (ws) ws.close();
+        };
+    </script>
+</body>
+</html>
