@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus Agent • SSE Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap');
+        
+        :root {
+            --primary: #6366f1;
+        }
+        
+        body {
+            font-family: 'Inter', system_ui, sans-serif;
+        }
+        
+        .font-display {
+            font-family: 'Space Grotesk', 'Inter', system_ui, sans-serif;
+            font-weight: 600;
+        }
+
+        .stream-container {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            line-height: 1.6;
+        }
+
+        .token {
+            animation: fadeIn 0.1s ease forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(2px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .sse-event {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="bg-zinc-950 text-zinc-200">
+    <div class="max-w-4xl mx-auto p-6">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-8">
+            <div class="flex items-center gap-x-3">
+                <div class="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center">
+                    <i class="fa-solid fa-robot text-white text-2xl"></i>
+                </div>
+                <div>
+                    <h1 class="font-display text-3xl font-semibold tracking-tight">Nexus Agent</h1>
+                    <p class="text-zinc-400 text-sm">Real-time SSE Streaming</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-x-2">
+                <div id="connection-status" 
+                     class="flex items-center gap-x-2 px-3 py-1.5 bg-zinc-900 rounded-2xl text-sm">
+                    <div class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
+                    <span class="text-emerald-400 font-medium">Connected</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Prompt -->
+                <div class="md:col-span-3">
+                    <label class="block text-sm font-medium text-zinc-400 mb-2">Prompt</label>
+                    <input id="prompt-input" type="text" 
+                           class="w-full bg-zinc-950 border border-zinc-700 focus:border-indigo-500 rounded-2xl px-4 py-3 text-sm outline-none"
+                           value="Explain how sovereign AI agent swarms emerge on decentralized mesh networks"
+                           placeholder="Enter your prompt...">
+                </div>
+
+                <!-- Model -->
+                <div>
+                    <label class="block text-sm font-medium text-zinc-400 mb-2">Model</label>
+                    <select id="model-select" 
+                            class="w-full bg-zinc-950 border border-zinc-700 rounded-2xl px-4 py-3 text-sm outline-none">
+                        <option value="grok-3">grok-3</option>
+                        <option value="grok-beta">grok-beta</option>
+                    </select>
+                </div>
+
+                <!-- Temperature -->
+                <div>
+                    <label class="block text-sm font-medium text-zinc-400 mb-2">
+                        Temperature <span id="temp-value" class="font-mono">0.7</span>
+                    </label>
+                    <input type="range" id="temperature-slider" 
+                           class="w-full accent-indigo-500" min="0" max="2" step="0.1" value="0.7">
+                </div>
+
+                <div class="flex items-end">
+                    <button onclick="startStream()"
+                            class="flex-1 bg-indigo-600 hover:bg-indigo-500 transition-colors text-white font-medium py-3 px-6 rounded-2xl flex items-center justify-center gap-x-2">
+                        <i class="fa-solid fa-play mr-2"></i>
+                        <span>Start Streaming</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Output -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+            <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-x-2">
+                    <i class="fa-solid fa-terminal text-zinc-400"></i>
+                    <span class="font-medium">Live Response</span>
+                </div>
+                <button onclick="clearOutput()" 
+                        class="text-xs px-3 py-1.5 hover:bg-zinc-800 transition-colors rounded-xl flex items-center gap-x-1.5 text-zinc-400 hover:text-zinc-300">
+                    <i class="fa-solid fa-trash text-xs"></i>
+                    <span>Clear</span>
+                </button>
+            </div>
+
+            <div id="output" 
+                 class="stream-container bg-zinc-950 border border-zinc-800 rounded-2xl p-5 min-h-[280px] max-h-[420px] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
+                <div class="text-zinc-500 italic">Response will appear here in real-time...</div>
+            </div>
+
+            <div id="status-bar" class="mt-4 flex items-center justify-between text-xs text-zinc-500">
+                <div id="status-text">Ready</div>
+                <div id="token-count" class="font-mono">0 tokens</div>
+            </div>
+        </div>
+
+        <div class="mt-6 text-center text-xs text-zinc-500">
+            Connected to <span class="font-mono">http://localhost:8000/stream</span>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let tokenCount = 0;
+
+        // Tailwind script
+        function initTailwind() {
+            document.documentElement.style.setProperty('--accent', '#6366f1');
+        }
+
+        function updateTemperatureValue() {
+            const slider = document.getElementById('temperature-slider');
+            const valueDisplay = document.getElementById('temp-value');
+            
+            slider.oninput = () => {
+                valueDisplay.textContent = slider.value;
+            };
+        }
+
+        function updateStatus(text, type = 'info') {
+            const statusEl = document.getElementById('status-text');
+            statusEl.textContent = text;
+            
+            if (type === 'streaming') {
+                statusEl.className = 'text-emerald-400';
+            } else if (type === 'error') {
+                statusEl.className = 'text-red-400';
+            } else {
+                statusEl.className = 'text-zinc-400';
+            }
+        }
+
+        function updateTokenCount(count) {
+            document.getElementById('token-count').textContent = `${count} tokens`;
+        }
+
+        function appendToken(text) {
+            const output = document.getElementById('output');
+            
+            // Remove placeholder on first token
+            if (output.querySelector('.italic')) {
+                output.innerHTML = '';
+            }
+
+            const span = document.createElement('span');
+            span.className = 'token';
+            span.textContent = text;
+            output.appendChild(span);
+            
+            // Auto-scroll
+            output.scrollTop = output.scrollHeight;
+            
+            tokenCount++;
+            updateTokenCount(tokenCount);
+        }
+
+        function clearOutput() {
+            const output = document.getElementById('output');
+            output.innerHTML = '<div class="text-zinc-500 italic">Response will appear here in real-time...</div>';
+            tokenCount = 0;
+            updateTokenCount(0);
+            updateStatus('Ready');
+        }
+
+        function startStream() {
+            const prompt = document.getElementById('prompt-input').value.trim();
+            if (!prompt) {
+                alert('Please enter a prompt');
+                return;
+            }
+
+            const model = document.getElementById('model-select').value;
+            const temperature = document.getElementById('temperature-slider').value;
+
+            // Close existing connection
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            clearOutput();
+            updateStatus('Connecting...', 'streaming');
+
+            const url = new URL('http://localhost:8000/stream');
+            url.searchParams.set('prompt', prompt);
+            url.searchParams.set('model', model);
+            url.searchParams.set('temperature', temperature);
+
+            eventSource = new EventSource(url.toString());
+
+            eventSource.onopen = () => {
+                updateStatus('Streaming...', 'streaming');
+            };
+
+            // Handle regular message events
+            eventSource.onmessage = (event) => {
+                appendToken(event.data);
+            };
+
+            // Custom event: message
+            eventSource.addEventListener('message', (event) => {
+                appendToken(event.data);
+            });
+
+            // Custom event: done
+            eventSource.addEventListener('done', (event) => {
+                updateStatus('Completed');
+                eventSource.close();
+                eventSource = null;
+            });
+
+            // Custom event: error
+            eventSource.addEventListener('error', (event) => {
+                const output = document.getElementById('output');
+                if (event.data) {
+                    appendToken(`\n[Error] ${event.data}`);
+                }
+                updateStatus('Error occurred', 'error');
+                eventSource.close();
+                eventSource = null;
+            });
+
+            // Fallback error handling
+            eventSource.onerror = (err) => {
+                console.error('SSE Error:', err);
+                updateStatus('Connection lost', 'error');
+                if (eventSource) {
+                    eventSource.close();
+                    eventSource = null;
+                }
+            };
+        }
+
+        // Keyboard support
+        function setupKeyboard() {
+            const input = document.getElementById('prompt-input');
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    startStream();
+                }
+            });
+
+            // Update temperature display
+            updateTemperatureValue();
+        }
+
+        // Initialize everything
+        function init() {
+            initTailwind();
+            setupKeyboard();
+            
+            // Set initial temperature display
+            document.getElementById('temp-value').textContent = 
+                document.getElementById('temperature-slider').value;
+
+            // Demo hint
+            console.log('%c[Nexus SSE Client] Ready. Open DevTools to see events.', 'color:#64748b');
+        }
+
+        // Boot the app
+        window.onload = init;
+    </script>
+</body>
+</html>
