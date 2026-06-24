@@ -1,18 +1,18 @@
-"""Base Agent class for the Nexus / agentic-ai swarm with REAL Grok tool calling.
+"""Base Agent class for the Nexus / agentic-ai swarm with REAL Grok tool calling + full ASYNC support.
 
-Provides:
-- Persistent state (skilllogin-style JSON)
-- Persona embodiment
-- Handoff protocol between agents
-- Integration hooks (mesh, blockchain)
-- REAL Grok / xAI tool calling via OpenAI-compatible API
-- ReAct-style agentic loop support
-- Extensible tool registry for Nexus domain (mesh, QCoin, creative, analysis, etc.)
+Features:
+- Persistent state (skilllogin-style)
+- Persona embodiment + handoff protocol
+- REAL Grok / xAI tool calling (sync + async)
+- ReAct-style agentic loops (sync + async)
+- Extensible Nexus tool registry (mesh, QCoin, creative, integration analysis)
+- Graceful fallback when no API key
 
-All specialized agents (Lyra, Xen, Nexus) inherit from this.
+All specialized agents (Lyra, Xen, Nexus) inherit this.
 
-Requirements: pip install openai
-Set XAI_API_KEY in environment (or .env)
+pip install openai
+
+export XAI_API_KEY=sk-...
 """
 
 from abc import ABC, abstractmethod
@@ -20,19 +20,19 @@ from typing import Any, Dict, List, Optional
 import json
 import os
 import time
+import asyncio
 
 try:
-    from openai import OpenAI
+    from openai import OpenAI, AsyncOpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-    OpenAI = None
+    OpenAI = AsyncOpenAI = None
 
 
 class BaseAgent(ABC):
-    """Abstract base for all Nexus agents with real Grok tool calling."""
+    """Abstract base for all Nexus agents with sync + async Grok tool calling."""
 
-    # Default Nexus-relevant tools (extend in subclasses or globally)
     DEFAULT_TOOLS = [
         {
             "type": "function",
@@ -45,7 +45,7 @@ class BaseAgent(ABC):
                         "components": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of Nexus components to analyze (e.g. ['mesh', 'qcoin', 'lyra', 'prototypes'])"
+                            "description": "List of Nexus components to analyze"
                         }
                     },
                     "required": ["components"]
@@ -56,7 +56,7 @@ class BaseAgent(ABC):
             "type": "function",
             "function": {
                 "name": "generate_creative_narrative",
-                "description": "Generate immersive roleplay, love letter, Suno prompt or story segment tied to Nexus themes.",
+                "description": "Generate immersive roleplay, love letter, Suno prompt or story tied to Nexus themes.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -72,11 +72,11 @@ class BaseAgent(ABC):
             "type": "function",
             "function": {
                 "name": "query_mesh_status",
-                "description": "Check status of xMesh, NovaNet, QNET or Yggdrasil network components.",
+                "description": "Check status of xMesh, NovaNet, QNET or Yggdrasil components.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "component": {"type": "string", "description": "e.g. peers, latency, QNET health"}
+                        "component": {"type": "string"}
                     },
                     "required": ["component"]
                 }
@@ -86,7 +86,7 @@ class BaseAgent(ABC):
             "type": "function",
             "function": {
                 "name": "suggest_qcoin_incentive",
-                "description": "Design or suggest QCoin/QNET rune incentive mechanisms for agent actions or swarm coordination.",
+                "description": "Design QCoin/QNET rune incentive mechanisms for agent/swarm actions.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -107,18 +107,17 @@ class BaseAgent(ABC):
         self._ensure_state_dir()
         self.login()
 
-        # Grok / xAI client (real tool calling)
+        # Sync + Async Grok clients
         self.client: Optional[OpenAI] = None
-        self._init_grok_client()
+        self.async_client: Optional[AsyncOpenAI] = None
+        self._init_grok_clients()
 
-        # Tool registry (can be extended per agent)
         self.tools = self.DEFAULT_TOOLS.copy()
 
     def _ensure_state_dir(self):
         os.makedirs(self.state_dir, exist_ok=True)
 
     def login(self):
-        """Skilllogin-style persistent state loading."""
         if os.path.exists(self.state_file):
             with open(self.state_file, "r", encoding="utf-8") as f:
                 self.state = json.load(f)
@@ -153,25 +152,25 @@ class BaseAgent(ABC):
     def get_state(self, key: str, default: Any = None) -> Any:
         return self.state.get(key, default)
 
-    def _init_grok_client(self):
-        """Initialize real Grok/xAI client if API key available."""
+    def _init_grok_clients(self):
+        """Initialize both sync and async Grok/xAI clients."""
         if not OPENAI_AVAILABLE:
-            print("[BaseAgent] Warning: openai package not installed. Real Grok tool calling disabled.")
+            print("[BaseAgent] Warning: openai not installed. Grok calls will be simulated.")
             return
 
         api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY")
         if not api_key:
-            print("[BaseAgent] Info: XAI_API_KEY not set. Grok tool calling will be simulated until key is provided.")
+            print("[BaseAgent] Info: XAI_API_KEY not set → using simulated mode.")
             return
 
         try:
-            self.client = OpenAI(
-                api_key=api_key,
-                base_url="https://api.x.ai/v1"  # xAI Grok OpenAI-compatible endpoint
-            )
-            print(f"[{self.name}] ✅ Real Grok tool calling enabled (xAI API connected)")
+            self.client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+            self.async_client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+            print(f"[{self.name}] ✅ Grok tool calling enabled (sync + async)")
         except Exception as e:
-            print(f"[{self.name}] Failed to init Grok client: {e}")
+            print(f"[{self.name}] Failed to init Grok clients: {e}")
+
+    # ==================== SYNC GROK METHODS ====================
 
     def call_grok(
         self,
@@ -182,20 +181,17 @@ class BaseAgent(ABC):
         max_tokens: int = 2048,
         tool_choice: str = "auto"
     ) -> Dict[str, Any]:
-        """Call Grok with optional tool calling support.
-
-        Returns the raw response dict. Use execute_tool_calls() to run returned tool calls.
-        """
+        """Synchronous Grok call with tool support."""
         if not self.client:
             return {
-                "error": "Grok client not initialized. Set XAI_API_KEY and install openai.",
-                "simulated_response": "[Simulated Grok] " + messages[-1]["content"][:200] + "..."
+                "error": "Grok client not ready. Set XAI_API_KEY.",
+                "simulated": True,
+                "content": "[Simulated] " + messages[-1].get("content", "")[:300]
             }
 
         tools = tools or self.tools
-
         try:
-            response = self.client.chat.completions.create(
+            resp = self.client.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=tools,
@@ -203,90 +199,132 @@ class BaseAgent(ABC):
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-            return response.model_dump()  # or .choices[0].message etc.
+            return resp.model_dump()
         except Exception as e:
             return {"error": str(e)}
 
     def execute_tool_call(self, tool_call: Dict) -> Any:
-        """Execute a single tool call returned by Grok.
-
-        Override or extend in subclasses for real mesh/QCoin/hardware actions.
-        """
+        """Execute a tool call returned by Grok (sync version). Override in subclasses for real actions."""
         func = tool_call.get("function", {})
         name = func.get("name")
         args = json.loads(func.get("arguments", "{}")) if func.get("arguments") else {}
 
-        self.log_event("tool_call", f"Executing {name} with {args}")
+        self.log_event("tool_call", f"{name}({args})")
 
-        # Built-in tool implementations (expand these)
         if name == "analyze_nexus_integration":
-            components = args.get("components", [])
-            return {
-                "analysis": f"Integration analysis for {components}",
-                "synergies": "mesh substrate + blockchain incentives + agent autonomy + prototype grounding",
-                "risks": ["network partitions", "token volatility", "agent drift"]
-            }
+            return {"analysis": args.get("components"), "synergies": "mesh + blockchain + agents + prototypes"}
         elif name == "generate_creative_narrative":
-            theme = args.get("theme", "Nexus emergence")
-            style = args.get("style", "lyrical")
-            return f"[{style.upper()}] Immersive narrative about {theme} in the sovereign mesh... (full creative output would continue here)"
+            return f"Creative {args.get('style', 'lyrical')} narrative about {args.get('theme')}"
         elif name == "query_mesh_status":
-            component = args.get("component", "peers")
-            return {"status": "healthy", "component": component, "note": "Simulated - connect to real nexus-daemon for live data"}
+            return {"status": "healthy", "component": args.get("component")}
         elif name == "suggest_qcoin_incentive":
-            action = args.get("action_type")
-            return {"incentive": f"QCoin reward for {action}", "mechanism": "rune-based reputation + mesh participation scoring"}
+            return {"incentive": f"QCoin for {args.get('action_type')}", "mechanism": "rune + mesh reputation"}
         else:
-            return {"status": "unknown_tool", "name": name, "args": args}
+            return {"unknown_tool": name, "args": args}
 
     def agentic_react_loop(
-        self,
-        user_input: str,
-        max_steps: int = 5,
-        model: str = "grok-3"
+        self, user_input: str, max_steps: int = 5, model: str = "grok-3"
     ) -> str:
-        """Simple ReAct-style agentic loop using real Grok tool calling.
-
-        1. Reason about the task
-        2. Decide on tool use or final answer
-        3. Execute tools if needed
-        4. Observe results and continue
-        """
+        """Sync ReAct loop using real Grok tool calling."""
         messages = [
-            {"role": "system", "content": f"You are {self.name}, a Nexus agent. Use tools when helpful. Be precise and helpful."},
+            {"role": "system", "content": f"You are {self.name} Nexus agent. Use tools when helpful."},
             {"role": "user", "content": user_input}
         ]
 
-        for step in range(max_steps):
+        for _ in range(max_steps):
             response = self.call_grok(messages, tools=self.tools, model=model)
-
             if "error" in response:
-                return f"Grok error: {response['error']}"
+                return f"Error: {response['error']}"
 
             message = response["choices"][0]["message"]
             messages.append(message)
 
             tool_calls = message.get("tool_calls", [])
             if not tool_calls:
-                # Final answer
-                return message.get("content", "No content from Grok")
+                return message.get("content", "No final answer")
 
-            # Execute tools and feed observations back
             for tc in tool_calls:
                 result = self.execute_tool_call(tc)
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc["id"],
+                    "tool_call_id": tc.get("id"),
                     "content": json.dumps(result)
                 })
 
-        return "Max steps reached without final answer."
+        return "Max steps reached."
+
+    # ==================== ASYNC GROK METHODS (NEW) ====================
+
+    async def async_call_grok(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        model: str = "grok-3",
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        tool_choice: str = "auto"
+    ) -> Dict[str, Any]:
+        """ASYNC Grok call with full tool support. Non-blocking."""
+        if not self.async_client:
+            # Fallback to sync simulated if async not available
+            sync_result = self.call_grok(messages, tools, model, temperature, max_tokens, tool_choice)
+            return sync_result
+
+        tools = tools or self.tools
+        try:
+            resp = await self.async_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return resp.model_dump()
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def async_execute_tool_call(self, tool_call: Dict) -> Any:
+        """Async version of tool execution. Override for real async operations (mesh, blockchain, I/O)."""
+        # For now delegate to sync version (most tools are fast).
+        # Future: make mesh queries, QCoin RPCs, hardware calls truly async here.
+        return self.execute_tool_call(tool_call)
+
+    async def async_agentic_react_loop(
+        self, user_input: str, max_steps: int = 5, model: str = "grok-3"
+    ) -> str:
+        """ASYNC ReAct loop with real Grok tool calling. Ideal for concurrent swarms or I/O-heavy agents."""
+        messages = [
+            {"role": "system", "content": f"You are {self.name} Nexus agent. Use tools when helpful."},
+            {"role": "user", "content": user_input}
+        ]
+
+        for _ in range(max_steps):
+            response = await self.async_call_grok(messages, tools=self.tools, model=model)
+            if "error" in response:
+                return f"Error: {response['error']}"
+
+            message = response["choices"][0]["message"]
+            messages.append(message)
+
+            tool_calls = message.get("tool_calls", [])
+            if not tool_calls:
+                return message.get("content", "No final answer from Grok")
+
+            for tc in tool_calls:
+                result = await self.async_execute_tool_call(tc)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id"),
+                    "content": json.dumps(result)
+                })
+
+        return "Max steps reached in async loop."
+
+    # ==================== COMMON METHODS ====================
 
     @abstractmethod
     def embody(self, context: str = "") -> str:
-        """Activate persona and generate response or action.
-        Subclasses should call super or use agentic_react_loop for tool-augmented responses.
-        """
         pass
 
     def handoff(self, target_agent: str, context: str) -> str:
@@ -298,10 +336,8 @@ class BaseAgent(ABC):
         self.update_state("events", events)
 
     def use_tool(self, tool_name: str, **kwargs) -> Any:
-        """Legacy / simple tool hook. Now enhanced with real Grok calling via agentic_react_loop or call_grok."""
         self.log_event("tool_use", f"{tool_name} with {kwargs}")
-        # For backward compatibility, you can route to Grok here if desired
-        return {"status": "use agentic_react_loop or call_grok for real tool calling", "tool": tool_name}
+        return {"status": "prefer agentic_react_loop or async_agentic_react_loop", "tool": tool_name}
 
     def integrate_with_mesh(self, action: str):
         return self.use_tool("mesh", action=action)
@@ -310,4 +346,5 @@ class BaseAgent(ABC):
         return self.use_tool("blockchain", action=action)
 
     def __repr__(self):
-        return f"<{self.name}Agent sessions={self.get_state('session_count')} grok={'enabled' if self.client else 'simulated'}>"
+        grok_mode = "async+sync" if self.async_client else ("sync-only" if self.client else "simulated")
+        return f"<{self.name}Agent sessions={self.get_state('session_count')} grok={grok_mode}>"
